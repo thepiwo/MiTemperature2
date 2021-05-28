@@ -21,6 +21,11 @@ import logging
 import json
 import requests
 
+import sys
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+PROMETHEUS_URL = "http://localhost:9091"
+
 @dataclass
 class Measurement:
 	temperature: float
@@ -104,27 +109,24 @@ def thread_SendingData():
 					identicalCounters[mea.sensorname]+=1
 					continue
 
-			if args.callback:
-				fmt = "sensorname,temperature,humidity,voltage" #don't try to seperate by semicolon ';' os.system will use that as command seperator
+			if args.prometheus:
 				if ' ' in mea.sensorname:
 					sensorname = '"' + mea.sensorname + '"'
 				else:
 					sensorname = mea.sensorname
-				params = sensorname + " " + str(mea.temperature) + " " + str(mea.humidity) + " " + str(mea.voltage)
-				if (args.TwoPointCalibration or args.offset): #would be more efficient to generate fmt only once
-					fmt +=",humidityCalibrated"
-					params += " " + str(mea.calibratedHumidity)
-				if (args.battery):
-					fmt +=",batteryLevel"
-					params += " " + str(mea.battery)
-				if (args.rssi):
-					fmt +=",rssi"
-					params += " " + str(mea.rssi)
-				params += " " + str(mea.timestamp)
-				fmt +=",timestamp"
-				cmd = path + "/" + args.callback + " " + fmt + " " + params
-				print(cmd)
-				ret = os.system(cmd)
+
+				registry = CollectorRegistry()
+
+				t = Gauge('temperature', 'Temperature, celsius', registry=registry, labelnames=('sensor', ))
+				h = Gauge('hygrometry', 'Humidity, percentage', registry=registry, labelnames=('sensor', ))
+				bv = Gauge('battery_level', 'Battery, percentage', registry=registry, labelnames=('sensor', ))
+
+				t.labels(sensorname).set(mea.temperature)
+				h.labels(sensorname).set(mea.humidity)
+				bv.labels(sensorname).set(mea.battery)
+
+				push_to_gateway(PROMETHEUS_URL, job='tempBatch', grouping_key={'sensor': sensorname}, registry=registry)
+				ret = 0
 
 			if args.httpcallback:
 				url = args.httpcallback.format(
@@ -264,7 +266,7 @@ class MyDelegate(btle.DefaultDelegate):
 				print("Calibrated humidity: " + str(humidityCalibrated))
 				measurement.calibratedHumidity = humidityCalibrated
 
-			if args.callback or args.httpcallback:
+			if args.prometheus or args.httpcallback:
 				measurements.append(measurement)
 
 			if(args.mqttconfigfile):
@@ -332,7 +334,7 @@ complexCalibrationGroup.add_argument("--calpoint2","-p2", help="Enter the second
 complexCalibrationGroup.add_argument("--offset2","-o2", help="Enter the offset for the second calibration point",type=int)
 
 callbackgroup = parser.add_argument_group("Callback related arguments")
-callbackgroup.add_argument("--callback","-call", help="Pass the path to a program/script that will be called on each new measurement")
+callbackgroup.add_argument("--prometheus","-prom", help="Enable to pass data to prometheus on each new measurement",action='store_true')
 callbackgroup.add_argument("--httpcallback","-http", help="Pass the URL to a program/script that will be called on each new measurement")
 callbackgroup.add_argument("--name","-n", help="Give this sensor a name reported to the callback script")
 callbackgroup.add_argument("--skipidentical","-skip", help="N consecutive identical measurements won't be reported to callbackfunction",metavar='N', type=int, default=0)
@@ -418,7 +420,7 @@ if args.TwoPointCalibration:
 if not args.name:
 	args.name = args.device
 
-if args.callback or args.httpcallback:
+if args.prometheus or args.httpcallback:
 	dataThread = threading.Thread(target=thread_SendingData)
 	dataThread.start()
 
@@ -635,7 +637,7 @@ elif args.atc:
 					if measurement.calibratedHumidity == 0:
 						measurement.calibratedHumidity = measurement.humidity
 
-					if args.callback or args.httpcallback:
+					if args.prometheus or args.httpcallback:
 						measurements.append(measurement)
 
 					if args.mqttconfigfile:
